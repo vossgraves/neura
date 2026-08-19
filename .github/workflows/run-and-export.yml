@@ -1,0 +1,74 @@
+name: neura run → txt export
+
+# Runs the gateway script (neura.py) the same way any user would, captures
+# everything it prints into a txt file, and publishes the file as an
+# artifact — no secrets, no token, no user context required. Every GitHub
+# runner starts with a fresh egress IP, so each run gets its own untouched
+# 50 req / 10k tok daily quota from the NeuralWatt free tier.
+#
+# Triggers:
+#   * every push to main
+#   * hourly (fresh runner IP → fresh quota each cycle)
+#   * manual workflow_dispatch
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  run-and-export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run the user script and tee everything to a txt
+        run: |
+          # "the user script" — starts the bridge, logs to neura-output.txt
+          python3 neura.py > neura-output.txt 2>&1 &
+          PID=$!
+
+          # wait for the gateway to answer (up to ~2 min)
+          up=0
+          for i in $(seq 1 60); do
+            if curl -sf -m 3 http://127.0.0.1:8787/v1/models > /dev/null 2>&1; then
+              up=1
+              break
+            fi
+            sleep 2
+          done
+          echo "## gateway up: $up (pid $PID)" | tee -a neura-output.txt
+
+          if [ "$up" = "1" ]; then
+            # pick the first model the bridge advertises, then exercise it
+            MODEL=$(curl -s -m 10 http://127.0.0.1:8787/v1/models \
+              | python3 -c 'import sys,json; print(json.load(sys.stdin)["data"][0]["id"])' 2>/dev/null || echo unknown)
+            echo "## model under test: $MODEL" | tee -a neura-output.txt
+            echo "## /v1/usage through this egress:" | tee -a neura-output.txt
+            curl -s -m 30 http://127.0.0.1:8787/v1/usage | tee -a neura-output.txt || true
+            echo "" | tee -a neura-output.txt
+            echo "## /v1/chat/completions smoke test:" | tee -a neura-output.txt
+            curl -s -m 240 http://127.0.0.1:8787/v1/chat/completions \
+              -H 'Content-Type: application/json' \
+              -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"reply with exactly: CI_OK\"}],\"max_tokens\":32}" \
+              | tee -a neura-output.txt || true
+            echo "" | tee -a neura-output.txt
+          fi
+
+          sleep 2
+          kill "$PID" 2>/dev/null || true
+          sleep 1
+          echo "## gateway stopped, export complete" | tee -a neura-output.txt
+
+      - name: Publish the txt export
+        uses: actions/upload-artifact@v4
+        with:
+          name: neura-output
+          path: neura-output.txt
+          if-no-files-found: error

@@ -53,6 +53,12 @@ quota, never yours.
 - **UA spoof**: presents itself as `opencode` upstream by default
   (`NW_UA` to override) — the full model catalog answers to any client.
 - **Modes**: `auto` (pool rotation), `single` (one proxy), `off` (direct).
+- **Static commercial backbones**: `NW_STATIC_PROXIES` seeds authenticated
+  (`user:pass@host:port`) private proxies into the pool — they're never
+  evicted, survive refreshes, and each carries its own fresh daily quota.
+- **CI self-test**: `.github/workflows/run-and-export.yml` runs `neura.py` on
+  every push + hourly, captures everything to `neura-output.txt`, and uploads
+  it as an artifact — no secrets, works for any user, fresh egress each run.
 - **Full catalog**: all 18+ NeuralWatt models served: deepseek-v4-flash
   (+flex), glm-5.2 (fast/flex/short/short-fast/short-flex/short-fast-flex),
   kimi-k2.7-code (fast/flex), kimi-k3 (fast/flex), qwen3.6-35b (fast),
@@ -94,6 +100,7 @@ All via environment variables. Copy `.env.example` and adjust:
 | `NW_PROXY_TIMEOUT` | `6` | seconds per proxy attempt on real requests |
 | `NW_PROBE_TIMEOUT` | `5` | seconds per proxy probe during cold-start pool sweep |
 | `NW_PROXY_REFRESH_SEC` | `600` | background refill interval |
+| `NW_STATIC_PROXIES` | *(empty)* | comma-separated `user:pass@host:port` private proxies, seeded into the pool at startup (authenticated, never evicted) |
 | `NW_DIRECT_FALLBACK` | `1` | fall back to direct egress if the pool empties |
 | `NW_UA` | `opencode` | User-Agent presented to the portal |
 | `NW_DEBUG` | *(unset)* | `1` prints verbose request/response traces |

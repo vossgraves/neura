@@ -161,7 +161,7 @@ class ProxyPool:
                 return p
         return None
 
-    def _mk(self, addr):
+    def _mk(self, addr, user=None, pw=None, static=False):
         return {
             "addr": addr,
             "quota": 0,                        # requests remaining today
@@ -170,6 +170,9 @@ class ProxyPool:
             "blocked": 0.0,                    # skip until this unix ts
             "used": 0.0,                       # tiebreak: last use
             "window": collections.deque(),     # minute-window request stamps
+            "user": user,
+            "pass": pw,
+            "static": static,
         }
 
     def refresh(self, force=False):
@@ -243,6 +246,10 @@ class ProxyPool:
                 if len(fresh) >= _MAX_POOL:
                     break
             with self._lk:
+                # static (commercial) members always survive a refresh
+                for p in list(self._pool):
+                    if p.get("static"):
+                        fresh.append(p)
                 self._pool = fresh
                 self._last_refresh = time.time()
             sys.stderr.write(
@@ -303,7 +310,7 @@ class ProxyPool:
             p = self._find(addr)
             if p:
                 p["fails"] += 1
-                if p["fails"] >= _MAX_FAILS:
+                if p["fails"] >= _MAX_FAILS and not p.get("static"):
                     self._pool.remove(p)
                     sys.stderr.write(f"[neura] evicting {addr} ({_MAX_FAILS} failures)\n")
                 else:
@@ -312,7 +319,7 @@ class ProxyPool:
     def evict(self, addr):
         with self._lk:
             p = self._find(addr)
-            if p:
+            if p and not p.get("static"):
                 self._pool.remove(p)
                 sys.stderr.write(f"[neura] evicting {addr} (daily budget gone)\n")
 
@@ -378,14 +385,12 @@ def fetch_candidates():
     return sorted(cands)
 
 
-def probe_proxy(addr):
+def probe_proxy(addr, auth=None):
     """(addr, quota, tokens) or None. Validate through the proxy with the
     REAL chat path (tiny POST), then read that IP's remaining quota via the
     usage endpoint. A member that passes this is chat-capable — the usage-GET
     alone proves relay only (some proxies pass GETs but choke on POSTs)."""
-    opener = urllib.request.build_opener(
-        urllib.request.ProxyHandler({"http": addr, "https": addr})
-    )
+    opener = opener_for(addr, auth)
     try:
         ping = json.dumps({
             "model": "deepseek-v4-flash",
@@ -421,6 +426,44 @@ def probe_proxy(addr):
 POOL = ProxyPool()
 
 
+def _seed_static():
+    """Add NW_STATIC_PROXIES (user:pass@host:port, comma-separated) to the
+    pool with an initial probe. Static members are never evicted, survive
+    refreshes, and give the pool a stable commercial backbone."""
+    raw = os.environ.get("NW_STATIC_PROXIES", "").strip()
+    if not raw:
+        return
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            cred, _, addr = item.rpartition("@")
+            if not cred or not addr:
+                raise ValueError("missing @")
+            u, _, pw = cred.partition(":")
+            if not u:
+                raise ValueError("missing user")
+        except ValueError:
+            sys.stderr.write(f"[neura] skipping bad static proxy: {item}\n")
+            continue
+        r = probe_proxy(addr, (u, pw))
+        with POOL._lk:
+            found = POOL._find(addr)
+            if found:
+                found["user"], found["pass"], found["static"] = u, pw, True
+                if r:
+                    found["quota"], found["tokens"] = r[1], r[2]
+                continue
+            p = POOL._mk(addr, user=u, pw=pw, static=True)
+            if r:
+                p["quota"], p["tokens"] = r[1], r[2]
+                POOL._pool.append(p)
+                sys.stderr.write(f"[neura] static proxy ok: {addr} (quota {p['quota']})\n")
+            else:
+                sys.stderr.write(f"[neura] static proxy probe failed: {addr}\n")
+
+
 def _pool_worker():
     """Background maintenance: warms the pool at startup, fills a sparse pool
     fast, full refresh on TTL."""
@@ -443,10 +486,24 @@ def _pool_worker():
         time.sleep(15)
 
 
-def opener_for(addr):
+def opener_for(addr, auth=None):
+    """Proxy opener; auth = (user, pass) for commercial/private proxies."""
+    if auth:
+        u, pw = auth
+        uri = f"http://{u}:{pw}@{addr}"
+    else:
+        uri = addr
     return urllib.request.build_opener(
-        urllib.request.ProxyHandler({"http": addr, "https": addr})
+        urllib.request.ProxyHandler({"http": uri, "https": uri})
     )
+
+
+def _auth_for(addr):
+    """Credentials for a known static pool member, if any."""
+    p = POOL._find(addr)
+    if p and p.get("user"):
+        return (p["user"], p["pass"])
+    return None
 
 
 def proxy_budget_left(addr):
@@ -454,7 +511,7 @@ def proxy_budget_left(addr):
     Only called on throttle signals — polling costs request slots."""
     try:
         req = urllib.request.Request(USAGE_URL, headers={"User-Agent": UA})
-        data = json.loads(opener_for(addr).open(req, timeout=10).read().decode())
+        data = json.loads(opener_for(addr, _auth_for(addr)).open(req, timeout=10).read().decode())
         return data.get("requests_remaining_day", 0) > 0 and data.get("tokens_remaining_day", 0) > 0
     except Exception:
         return True
@@ -518,8 +575,9 @@ def _proxy_attempt(addr, payload, timeout=20):
         },
         method="POST",
     )
+    auth = _auth_for(addr)
     try:
-        resp = opener_for(addr).open(req, timeout=timeout)
+        resp = opener_for(addr, auth).open(req, timeout=timeout)
         raw = resp.read()
         if resp.status == 200:
             if _has_usable_output(raw.decode("utf-8", "replace")):
@@ -1348,6 +1406,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     if _PROXY_MODE == "auto":
+        _seed_static()
         threading.Thread(target=_pool_worker, daemon=True).start()
         print("[neura] proxy rotation enabled — each egress IP carries its own 50 req / 10k tok daily quota", flush=True)
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
