@@ -81,6 +81,7 @@ _LIST_URLS = [
 _MIN_POOL = int(os.environ.get("NW_PROXY_MIN_POOL", "3"))
 _MAX_POOL = int(os.environ.get("NW_PROXY_MAX_POOL", "20"))
 _PROXY_TIMEOUT = float(os.environ.get("NW_PROXY_TIMEOUT", "6"))
+_PROBE_TIMEOUT = float(os.environ.get("NW_PROBE_TIMEOUT", "3.5"))  # cold-start sweep only
 _REFRESH_SEC = float(os.environ.get("NW_PROXY_REFRESH_SEC", "600"))
 _DIRECT_FALLBACK = os.environ.get("NW_DIRECT_FALLBACK", "1") == "1"
 _PER_PROXY_MIN = 4   # headroom under the portal's 5 req/min per-IP ceiling
@@ -195,11 +196,11 @@ class ProxyPool:
                     break
             ex1.shutdown(wait=False)
             # stage 2: bounded HTTP probe of the portal usage endpoint
-            wanted = max(_MAX_POOL * 2, _MIN_POOL + 2)
+            wanted = max(_MIN_POOL + 2, min(_MAX_POOL + 4, 24))
             results = []
             random.shuffle(live)
-            ex2 = ThreadPoolExecutor(max_workers=8)
-            futs2 = {ex2.submit(probe_proxy, c): c for c in live[:100]}
+            ex2 = ThreadPoolExecutor(max_workers=16)
+            futs2 = {ex2.submit(probe_proxy, c): c for c in live[:60]}
             for f in as_completed(futs2):
                 r = f.result()
                 if r:
@@ -264,7 +265,7 @@ class ProxyPool:
                     w.append(now)
                     return p["addr"], 0.0
             oldest = min((p["window"][0] for p in ready if p["window"]), default=now)
-            wait = min(70.0, max(0.0, 60 - (now - oldest) + 0.2))
+            wait = min(15.0, max(0.0, 60 - (now - oldest) + 0.2))
             sys.stderr.write(f"[neura] all proxies minute-capped, waiting {wait:.0f}s\n")
             return None, wait
 
@@ -341,13 +342,18 @@ def _parse_list(text):
 
 def fetch_candidates():
     cands = set()
-    for url in _LIST_URLS:
+    fetched = {}
+
+    def grab(url):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": UA})
-            txt = urllib.request.urlopen(req, timeout=12).read().decode("utf-8", "replace")
+            fetched[url] = urllib.request.urlopen(req, timeout=8).read().decode("utf-8", "replace")
         except Exception as e:
             sys.stderr.write(f"[neura] proxy list fetch failed ({url}): {e}\n")
-            continue
+
+    with ThreadPoolExecutor(max_workers=len(_LIST_URLS)) as ex:
+        list(ex.map(grab, _LIST_URLS))
+    for url, txt in fetched.items():
         n = len(cands)
         cands |= _parse_list(txt)
         sys.stderr.write(f"[neura] proxy list {url}: +{len(cands) - n} candidates\n")
@@ -375,11 +381,11 @@ def probe_proxy(addr):
             headers={"Content-Type": "application/json", "User-Agent": UA},
             method="POST",
         )
-        raw = opener.open(req, timeout=_PROXY_TIMEOUT).read().decode("utf-8", "replace")
+        raw = opener.open(req, timeout=_PROBE_TIMEOUT).read().decode("utf-8", "replace")
         if not _has_usable_output(raw):
             return None
         ureq = urllib.request.Request(USAGE_URL, headers={"User-Agent": UA})
-        u = json.loads(opener.open(ureq, timeout=_PROXY_TIMEOUT).read().decode("utf-8", "replace"))
+        u = json.loads(opener.open(ureq, timeout=_PROBE_TIMEOUT).read().decode("utf-8", "replace"))
         return addr, int(u.get("requests_remaining_day", 0)), int(u.get("tokens_remaining_day", 0))
     except (urllib.error.HTTPError, urllib.error.URLError, EOFError, ValueError, OSError):
         return None
@@ -391,7 +397,14 @@ POOL = ProxyPool()
 
 
 def _pool_worker():
-    """Background maintenance: fills a sparse pool fast, full refresh on TTL."""
+    """Background maintenance: warms the pool at startup, fills a sparse pool
+    fast, full refresh on TTL."""
+    # First pass on a fresh start: the counters start at 0.0 so the
+    # low/stale logic below would never trigger — warm the pool NOW so the
+    # first user request never waits on a synchronous refresh.
+    if not POOL.ready():
+        sys.stderr.write("[neura] startup warmup: probing proxy pool...\n")
+        POOL.refresh(force=True)
     while True:
         try:
             with POOL._lk:
@@ -507,7 +520,10 @@ def _call_with_pool(payload, deadline_sec=180, parallel=3):
     if not POOL.ready():
         sys.stderr.write("[neura] pool empty; warming up (first call may take ~30s)\n")
         POOL.refresh(force=True)
+    _round = 0
     while time.time() < deadline:
+        _round += 1
+        _round_start = time.time()
         picks = []
         for _ in range(parallel):
             addr, wait = POOL.pick()
@@ -534,6 +550,7 @@ def _call_with_pool(payload, deadline_sec=180, parallel=3):
                     sys.stderr.write("[neura] proxy pool empty — falling back to direct egress (own IP quota)\n")
                     return _call_direct(payload)
                 return 503, b'{"error": {"message": "no usable public proxy in pool; retry later or set NW_PROXY_MODE=off"}}'
+            time.sleep(2)  # pool healthy but every member busy/blocked: avoid busy-spin
             continue
         ex = ThreadPoolExecutor(max_workers=len(picks))
         futs = {ex.submit(_proxy_attempt, a, payload): a for a in picks}
@@ -543,7 +560,7 @@ def _call_with_pool(payload, deadline_sec=180, parallel=3):
                 sys.stderr.write(f"[neura] proxy attempt {addr}: {kind}\n")
                 if kind == "ok":
                     POOL.ok(addr)
-                    sys.stderr.write(f"[neura] chat served via {addr}\n")
+                    sys.stderr.write(f"[neura] chat served via {addr} in {time.time() - _round_start:.1f}s (round {_round})\n")
                     return 200, data
                 elif kind == "throttle":
                     if proxy_budget_left(addr):

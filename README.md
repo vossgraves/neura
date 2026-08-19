@@ -91,7 +91,8 @@ All via environment variables. Copy `.env.example` and adjust:
 | `NW_PROXY` | *(empty)* | explicit proxy (`http://ip:port`) when mode is `single` |
 | `NW_PROXY_MIN_POOL` | `3` | minimum healthy proxies to maintain |
 | `NW_PROXY_MAX_POOL` | `20` | maximum pool members kept at once |
-| `NW_PROXY_TIMEOUT` | `6` | seconds per proxy probe |
+| `NW_PROXY_TIMEOUT` | `6` | seconds per proxy attempt on real requests |
+| `NW_PROBE_TIMEOUT` | `3.5` | seconds per proxy probe during cold-start pool sweep |
 | `NW_PROXY_REFRESH_SEC` | `600` | background refill interval |
 | `NW_DIRECT_FALLBACK` | `1` | fall back to direct egress if the pool empties |
 | `NW_UA` | `opencode` | User-Agent presented to the portal |
