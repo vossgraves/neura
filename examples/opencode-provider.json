@@ -1,0 +1,149 @@
+{
+  "neuralwatt": {
+    "npm": "@ai-sdk/openai-compatible",
+    "name": "Neuralwatt",
+    "options": {
+      "baseURL": "https://api.neuralwatt.com/v1",
+      "apiKey": "{env:NEURALWATT_API_KEY}"
+    },
+    "models": {
+      "deepseek-v4-flash": {
+        "name": "DeepSeek V4 Flash",
+        "tool_call": true,
+        "limit": {
+          "context": 1048560,
+          "output": 32768
+        }
+      },
+      "kimi-k2.7-code": {
+        "name": "Kimi K2.7 Code",
+        "tool_call": true,
+        "options": {
+          "repetitionPenalty": 1.05
+        },
+        "limit": {
+          "context": 262128,
+          "output": 16384
+        }
+      },
+      "kimi-k2.7-code-fast": {
+        "name": "Kimi K2.7 Code Fast",
+        "tool_call": true,
+        "options": {
+          "repetitionPenalty": 1.05
+        },
+        "limit": {
+          "context": 262128,
+          "output": 16384
+        }
+      },
+      "glm-5.2": {
+        "name": "GLM-5.2",
+        "tool_call": true,
+        "reasoning": true,
+        "interleaved": {
+          "field": "reasoning_content"
+        },
+        "limit": {
+          "context": 1048560,
+          "output": 32768
+        }
+      },
+      "kimi-k3": {
+        "name": "Kimi K3",
+        "tool_call": true,
+        "options": {
+          "repetitionPenalty": 1.05
+        },
+        "limit": {
+          "context": 1048560,
+          "output": 32768
+        }
+      },
+      "qwen3.6-35b": {
+        "name": "Qwen3.6 35B",
+        "tool_call": true,
+        "limit": {
+          "context": 131056,
+          "output": 32768
+        }
+      },
+      "gemma-4-31b": {
+        "name": "Gemma 4 31B (vision)",
+        "tool_call": true,
+        "vision": true,
+        "limit": {
+          "context": 262128,
+          "output": 32768
+        }
+      }
+    }
+  },
+  "neuralwatt-free": {
+    "npm": "@ai-sdk/openai-compatible",
+    "name": "Neuralwatt Free (portal shim)",
+    "options": {
+      "baseURL": "http://127.0.0.1:8787/v1",
+      "apiKey": "free-trial"
+    },
+    "models": {
+      "deepseek-v4-flash": {
+        "name": "DeepSeek V4 Flash",
+        "tool_call": true,
+        "limit": {
+          "context": 1048000,
+          "output": 1024
+        }
+      },
+      "kimi-k2.7-code": {
+        "name": "Kimi K2.7 Code",
+        "tool_call": true,
+        "limit": {
+          "context": 262000,
+          "output": 1024
+        }
+      },
+      "kimi-k2.7-code-fast": {
+        "name": "Kimi K2.7 Code Fast",
+        "tool_call": true,
+        "limit": {
+          "context": 262000,
+          "output": 1024
+        }
+      },
+      "kimi-k2.7-code-flex": {
+        "name": "Kimi K2.7 Code Flex",
+        "tool_call": true,
+        "limit": {
+          "context": 262000,
+          "output": 1024
+        }
+      },
+      "glm-5.2-short-fast": {
+        "name": "GLM-5.2 Short Fast",
+        "tool_call": true,
+        "limit": {
+          "context": 199000,
+          "output": 1024
+        }
+      },
+      "qwen3.6-35b-fast": {
+        "name": "Qwen3.6 35B Fast",
+        "tool_call": true,
+        "limit": {
+          "context": 131000,
+          "output": 1024
+        }
+      },
+      "gemma-4-31b": {
+        "name": "Gemma 4 31B (vision)",
+        "tool_call": true,
+        "vision": true,
+        "limit": {
+          "context": 262000,
+          "output": 1024
+        }
+      }
+    }
+  }
+}

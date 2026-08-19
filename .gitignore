@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+neura.log
+last-request.json
+.env

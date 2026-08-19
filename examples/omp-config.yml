@@ -1,0 +1,25 @@
+# oh-my-pi example — modelRoles pinned to the free provider, MCP + skills wiring
+# Put the modelRoles block into ~/.omp/agent/config.yml (or run the omp config set lines).
+modelRoles:
+  default: neuralwatt-free/deepseek-v4-flash
+  smol: neuralwatt-free/deepseek-v4-flash
+  slow: neuralwatt-free/kimi-k2.7-code
+  plan: neuralwatt-free/kimi-k2.7-code
+  commit: neuralwatt-free/deepseek-v4-flash
+mcp:
+  enableProjectConfig: false
+  servers:
+    codebase-memory-mcp:
+      type: codebase-memory-mcp
+      url: http://localhost:8764
+      enabled: true
+skills:
+  enabled: true
+  customDirectories:
+    - /root/.config/opencode/skill
+
+# one-liners:
+#   omp config set modelRoles.default neuralwatt-free/deepseek-v4-flash
+#   omp config set modelRoles.slow neuralwatt-free/kimi-k2.7-code
+#   omp config set skills.enabled true
+#   omp config set skills.customDirectories '["/root/.config/opencode/skill"]'

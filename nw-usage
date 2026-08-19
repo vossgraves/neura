@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# neura quota reporter — free tier status (local shim) or paid balance (key).
+set -euo pipefail
+
+if [ -n "${NEURALWATT_API_KEY:-}" ]; then
+    curl -s --max-time 15 https://api.neuralwatt.com/v1/quota \
+        -H "Authorization: Bearer $NEURALWATT_API_KEY" | python3 -m json.tool
+    exit 0
+fi
+
+PORT="${NW_SHIM_PORT:-8787}"
+RESP="$(curl -s --max-time 10 "http://127.0.0.1:${PORT}/v1/usage")"
+if echo "$RESP" | python3 -m json.tool >/dev/null 2>&1; then
+    echo "$RESP" | python3 -m json.tool
+else
+    echo "usage endpoint returned: $RESP"
+    exit 1
+fi
