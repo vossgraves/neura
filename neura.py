@@ -429,14 +429,17 @@ POOL = ProxyPool()
 def _seed_static():
     """Add NW_STATIC_PROXIES (user:pass@host:port, comma-separated) to the
     pool with an initial probe. Static members are never evicted, survive
-    refreshes, and give the pool a stable commercial backbone."""
+    refreshes, and give the pool a stable commercial backbone.
+    Runs in its own daemon thread — the server binds first and serves the
+    public pool while the commercial backbone primes in the background."""
     raw = os.environ.get("NW_STATIC_PROXIES", "").strip()
     if not raw:
         return
-    for item in raw.split(","):
-        item = item.strip()
-        if not item:
-            continue
+    items = [i.strip() for i in raw.split(",") if i.strip()]
+    if not items:
+        return
+    parsed = []
+    for item in items:
         try:
             cred, _, addr = item.rpartition("@")
             if not cred or not addr:
@@ -444,9 +447,11 @@ def _seed_static():
             u, _, pw = cred.partition(":")
             if not u:
                 raise ValueError("missing user")
+            parsed.append((addr, u, pw))
         except ValueError:
             sys.stderr.write(f"[neura] skipping bad static proxy: {item}\n")
-            continue
+
+    def _seed_one(addr, u, pw):
         r = probe_proxy(addr, (u, pw))
         with POOL._lk:
             found = POOL._find(addr)
@@ -454,7 +459,7 @@ def _seed_static():
                 found["user"], found["pass"], found["static"] = u, pw, True
                 if r:
                     found["quota"], found["tokens"] = r[1], r[2]
-                continue
+                return
             p = POOL._mk(addr, user=u, pw=pw, static=True)
             if r:
                 p["quota"], p["tokens"] = r[1], r[2]
@@ -462,6 +467,10 @@ def _seed_static():
                 sys.stderr.write(f"[neura] static proxy ok: {addr} (quota {p['quota']})\n")
             else:
                 sys.stderr.write(f"[neura] static proxy probe failed: {addr}\n")
+
+    with ThreadPoolExecutor(max_workers=12, thread_name_prefix="seed") as ex:
+        for addr, u, pw in parsed:
+            ex.submit(_seed_one, addr, u, pw)
 
 
 def _pool_worker():
@@ -1405,11 +1414,11 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     if _PROXY_MODE == "auto":
-        _seed_static()
+        threading.Thread(target=_seed_static, daemon=True).start()
         threading.Thread(target=_pool_worker, daemon=True).start()
         print("[neura] proxy rotation enabled — each egress IP carries its own 50 req / 10k tok daily quota", flush=True)
-    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     egress = "direct" if _PROXY_MODE == "off" else (
         "single proxy" if _PROXY_MODE == "single" else "rotating proxy pool")
     print(f"[neura] Neuralwatt free bridge on http://127.0.0.1:{PORT}/v1", flush=True)
