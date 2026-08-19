@@ -72,17 +72,27 @@ if PROXY and _PROXY_MODE == "auto":
 _LIST_URLS = [
     u.strip() for u in os.environ.get(
         "NW_PROXY_LIST_URLS",
+        # Reputed/frequently-refreshed public sources (Reddit + benchmark consensus):
+        # monosans (hourly, server-checked), TheSpeedX (auto-updated),
+        # proxyscrape v4 + v2 (minute-refresh, developer-standard),
+        # proxifly (5-min, 6.5k-star), clarketm (daily, quality-checked),
+        # iplocate (30-min, anonymizing only), geonode (API, lastChecked-sorted).
+        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt,"
         "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt,"
+        "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=ipport&format=text,"
         "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=all&ssl=yes&anonymity=all,"
-        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
+        "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.txt,"
+        "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt,"
+        "https://raw.githubusercontent.com/iplocate/free-proxy-list/main/protocols/http.txt,"
+        "https://proxylist.geonode.com/api/proxy-list?limit=500&page=1&sort_by=lastChecked&sort_type=desc&protocol=http",
     ).split(",")
     if u.strip()
 ]
-_MIN_POOL = int(os.environ.get("NW_PROXY_MIN_POOL", "3"))
+_MIN_POOL = int(os.environ.get("NW_PROXY_MIN_POOL", "5"))
 _MAX_POOL = int(os.environ.get("NW_PROXY_MAX_POOL", "20"))
 _PROXY_TIMEOUT = float(os.environ.get("NW_PROXY_TIMEOUT", "6"))
-_PROBE_TIMEOUT = float(os.environ.get("NW_PROBE_TIMEOUT", "3.5"))  # cold-start sweep only
-_REFRESH_SEC = float(os.environ.get("NW_PROXY_REFRESH_SEC", "600"))
+_PROBE_TIMEOUT = float(os.environ.get("NW_PROBE_TIMEOUT", "5"))  # cold-start sweep only
+_REFRESH_SEC = float(os.environ.get("NW_PROXY_REFRESH_SEC", "300"))
 _DIRECT_FALLBACK = os.environ.get("NW_DIRECT_FALLBACK", "1") == "1"
 _PER_PROXY_MIN = 4   # headroom under the portal's 5 req/min per-IP ceiling
 _MAX_FAILS = 3       # consecutive failures before a proxy is evicted
@@ -184,24 +194,30 @@ class ProxyPool:
             # public lists are mostly dead weight, and executor futures keep
             # running after we return, so cut off early and let leftovers
             # drain in the background (shutdown(wait=False)).
-            probe_set = cands[:500]
+            probe_set = cands[:1500]
             random.shuffle(probe_set)
             live = []
+            tcp_deadline = time.time() + 15
             ex1 = ThreadPoolExecutor(max_workers=24)
             futs1 = {ex1.submit(_tcp_ok, c): c for c in probe_set}
             for f in as_completed(futs1):
+                if time.time() > tcp_deadline:
+                    break
                 if f.result():
                     live.append(futs1[f])
                 if len(live) >= 150:
                     break
             ex1.shutdown(wait=False)
             # stage 2: bounded HTTP probe of the portal usage endpoint
-            wanted = max(_MIN_POOL + 2, min(_MAX_POOL + 4, 24))
+            wanted = max(_MIN_POOL + 2, min(_MAX_POOL + 4, 12))
+            probe_deadline = time.time() + 30
             results = []
             random.shuffle(live)
             ex2 = ThreadPoolExecutor(max_workers=16)
             futs2 = {ex2.submit(probe_proxy, c): c for c in live[:60]}
             for f in as_completed(futs2):
+                if time.time() > probe_deadline:
+                    break
                 r = f.result()
                 if r:
                     results.append(r)
@@ -332,6 +348,8 @@ def _parse_list(text):
         return out
     for ln in t.splitlines():
         ln = ln.strip()
+        if ln.startswith(("http://", "https://")):
+            ln = ln.split("//", 1)[-1]
         if not ln or " " in ln or "/" in ln:
             continue
         host, _, port = ln.partition(":")
@@ -373,7 +391,7 @@ def probe_proxy(addr):
             "model": "deepseek-v4-flash",
             "messages": [{"role": "user", "content": "ping"}],
             "max_tokens": 1,
-            "stream": True,
+            "stream": False,
         }).encode()
         req = urllib.request.Request(
             TARGET,
@@ -382,11 +400,18 @@ def probe_proxy(addr):
             method="POST",
         )
         raw = opener.open(req, timeout=_PROBE_TIMEOUT).read().decode("utf-8", "replace")
-        if not _has_usable_output(raw):
+        if not _probe_ok(raw):
             return None
         ureq = urllib.request.Request(USAGE_URL, headers={"User-Agent": UA})
-        u = json.loads(opener.open(ureq, timeout=_PROBE_TIMEOUT).read().decode("utf-8", "replace"))
-        return addr, int(u.get("requests_remaining_day", 0)), int(u.get("tokens_remaining_day", 0))
+        try:
+            u = json.loads(opener.open(ureq, timeout=_PROBE_TIMEOUT).read().decode("utf-8", "replace"))
+            quota = int(u.get("requests_remaining_day", 0))
+        except Exception:
+            # Usage GET failed but the chat ping passed — public proxies often
+            # choke on the extra hop. Admit the member with a conservative
+            # quota: pickable when the pool is thin, evicted on real 429s.
+            quota = 2
+        return addr, quota, 0
     except (urllib.error.HTTPError, urllib.error.URLError, EOFError, ValueError, OSError):
         return None
     except Exception:
@@ -525,13 +550,17 @@ def _call_with_pool(payload, deadline_sec=180, parallel=3):
         _round += 1
         _round_start = time.time()
         picks = []
-        for _ in range(parallel):
+        seen = set()
+        for _ in range(parallel + 2):
             addr, wait = POOL.pick()
-            if addr:
+            if addr and addr not in seen:
+                seen.add(addr)
                 picks.append(addr)
-            elif wait > 0:
-                time.sleep(min(wait, max(0.0, deadline - time.time())))
-            else:
+            if len(picks) >= parallel:
+                break
+            if not addr and wait > 0:
+                time.sleep(min(wait, 2.0))
+            elif not addr:
                 break
         if not picks:
             if not POOL.ready():
@@ -894,6 +923,20 @@ def upstream_opener():
 
 
 OPENER = upstream_opener()
+
+
+def _probe_ok(raw):
+    """True when a non-stream completion body actually contains content."""
+    try:
+        p = json.loads(raw)
+        ch = (p.get("choices") or [])
+        if not ch:
+            return False
+        msg = (ch[0].get("message") or {}).get("content")
+        delta = (ch[0].get("delta") or {}).get("content")
+        return bool(msg or delta or ch[0].get("finish_reason"))
+    except Exception:
+        return False
 
 
 def _has_usable_output(raw):
