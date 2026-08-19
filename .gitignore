@@ -3,3 +3,9 @@ __pycache__/
 neura.log
 last-request.json
 .env
+static-proxies.env
+*.env
+!.env.example
+!examples/omp-models.yml
+!examples/omp-config.yml
+!examples/opencode-provider.json
